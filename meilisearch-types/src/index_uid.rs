@@ -1,8 +1,138 @@
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
+use std::ops::Deref;
 use std::str::FromStr;
 
+const PATTERN_IDENTIFIER: char = '*';
+
+#[derive(Debug, Clone)]
+pub enum IndexType {
+    Name(IndexUid),
+    Pattern(IndexPattern),
+}
+
+impl PartialEq for IndexType {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Name(left), Self::Name(right)) => left == right,
+            (Self::Pattern(left), Self::Pattern(right)) => left.deref() == right.deref(),
+            (_, _) => false,
+        }
+    }
+}
+
+impl Deref for IndexType {
+    type Target = str;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Name(x) => x.deref(),
+            Self::Pattern(x) => x.deref(),
+        }
+    }
+}
+
+impl From<IndexType> for String {
+    fn from(x: IndexType) -> Self {
+        match x {
+            IndexType::Name(y) => y.into_inner(),
+            IndexType::Pattern(y) => y.original_pattern,
+        }
+    }
+}
+
+impl PartialEq<str> for IndexType {
+    fn eq(&self, other: &str) -> bool {
+        match (self, other) {
+            (Self::Name(x), y) => x.0 == y,
+            (Self::Pattern(x), y) => y.starts_with(&x.prefix),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct IndexPattern {
+    prefix: String,
+    original_pattern: String,
+}
+
+impl IndexPattern {
+    fn from_pattern(pattern: String) -> Self {
+        let prefix = pattern[..pattern.len() - 1].to_owned();
+        let original_pattern = pattern;
+        Self {
+            prefix,
+            original_pattern,
+        }
+    }
+}
+
+impl Deref for IndexPattern {
+    type Target = str;
+    fn deref(&self) -> &Self::Target {
+        &self.original_pattern
+    }
+}
+
+#[derive(Debug)]
+pub struct IndexPatternError(String);
+
+impl fmt::Display for IndexPatternError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Pattern should end with {}. Received => {}",
+            PATTERN_IDENTIFIER, self.0
+        )
+    }
+}
+
+impl Error for IndexPatternError {}
+
+#[derive(Debug)]
+pub enum IndexTypeError {
+    Name(IndexUidFormatError),
+    Pattern(IndexPatternError),
+}
+
+impl fmt::Display for IndexTypeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Name(x) => x.fmt(f),
+            Self::Pattern(x) => x.fmt(f),
+        }
+    }
+}
+
+impl From<IndexUidFormatError> for IndexTypeError {
+    fn from(x: IndexUidFormatError) -> Self {
+        Self::Name(x)
+    }
+}
+
+impl From<IndexPatternError> for IndexTypeError {
+    fn from(x: IndexPatternError) -> Self {
+        Self::Pattern(x)
+    }
+}
+
+impl TryFrom<String> for IndexType {
+    type Error = IndexTypeError;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if let Some(x) = value.strip_suffix(PATTERN_IDENTIFIER) {
+            Ok(Self::Pattern(IndexPattern::from_pattern(x.to_owned())))
+        } else {
+            Ok(Self::Name(IndexUid::try_from(value)?))
+        }
+    }
+}
+
+impl FromStr for IndexType {
+    type Err = IndexTypeError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.to_owned().try_into()
+    }
+}
 /// An index uid is composed of only ascii alphanumeric characters, - and _, between 1 and 400
 /// bytes long
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
