@@ -266,6 +266,7 @@ pub enum Status {
     Processing,
     Succeeded,
     Failed,
+    Canceled,
 }
 
 impl Display for Status {
@@ -275,6 +276,7 @@ impl Display for Status {
             Status::Processing => write!(f, "processing"),
             Status::Succeeded => write!(f, "succeeded"),
             Status::Failed => write!(f, "failed"),
+            Status::Canceled => write!(f, "canceled"),
         }
     }
 }
@@ -288,8 +290,9 @@ impl FromStr for Status {
             "processing" => Ok(Status::Processing),
             "succeeded" => Ok(Status::Succeeded),
             "failed" => Ok(Status::Failed),
+            "canceled" => Ok(Status::Canceled),
             s => Err(ResponseError::from_msg(
-                format!("`{}` is not a status. Available types are", s),
+                format!("`{}` is not a status. Available types are enqueued, processing, succeeded, failed, and canceled", s),
                 Code::BadRequest,
             )),
         }
