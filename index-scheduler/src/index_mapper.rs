@@ -77,16 +77,14 @@ impl IndexMapper {
 
     /// Removes the index from the mapping table and the in-memory index map
     /// but keeps the associated tasks.
-    pub fn delete_index(&self, mut wtxn: RwTxn, name: &str) -> Result<()> {
+    pub fn delete_index(&self, wtxn: &mut RwTxn, name: &str) -> Result<()> {
         let uuid = self
             .index_mapping
             .get(&wtxn, name)?
             .ok_or_else(|| Error::IndexNotFound(name.to_string()))?;
 
         // Once we retrieved the UUID of the index we remove it from the mapping table.
-        assert!(self.index_mapping.delete(&mut wtxn, name)?);
-
-        wtxn.commit()?;
+        assert!(self.index_mapping.delete(wtxn, name)?);
 
         // We remove the index from the in-memory index map.
         let mut lock = self.index_map.write().unwrap();
@@ -179,7 +177,7 @@ impl IndexMapper {
             .collect()
     }
 
-    /// Swap two index name.
+    /// Swap two index names.
     pub fn swap(&self, wtxn: &mut RwTxn, lhs: &str, rhs: &str) -> Result<()> {
         let lhs_uuid = self
             .index_mapping
@@ -194,6 +192,10 @@ impl IndexMapper {
         self.index_mapping.put(wtxn, rhs, &lhs_uuid)?;
 
         Ok(())
+    }
+
+    pub fn index_exists(&self, rtxn: &RoTxn, name: &str) -> Result<bool> {
+        Ok(self.index_mapping.get(rtxn, name)?.is_some())
     }
 
     pub fn indexer_config(&self) -> &IndexerConfig {

@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+use crate::utils::swap_index_uid_in_task;
+use crate::Query;
 use crate::{autobatcher::BatchKind, Error, IndexScheduler, Result, TaskId};
 
 use meilisearch_types::tasks::{Details, Kind, KindWithContent, Status, Task};
@@ -40,6 +42,9 @@ pub(crate) enum Batch {
     IndexDeletion {
         index_uid: String,
         tasks: Vec<Task>,
+    },
+    IndexSwap {
+        task: Task,
     },
 }
 
@@ -123,6 +128,7 @@ impl Batch {
                     ..
                 } => tasks.iter().chain(other).map(|task| task.uid).collect(),
             },
+            Batch::IndexSwap { task } => vec![task.uid],
         }
     }
 }
@@ -360,7 +366,10 @@ impl IndexScheduler {
                 index_uid,
                 tasks: self.get_existing_tasks(rtxn, ids)?,
             })),
-            BatchKind::IndexSwap { id: _ } => todo!(),
+            BatchKind::IndexSwap { id } => {
+                let task = self.get_task(rtxn, id)?.ok_or(Error::CorruptedTaskQueue)?;
+                Ok(Some(Batch::IndexSwap { task }))
+            }
         }
     }
 
@@ -446,7 +455,7 @@ impl IndexScheduler {
         Ok(None)
     }
 
-    pub(crate) fn process_batch(&self, batch: Batch) -> Result<Vec<Task>> {
+    pub(crate) fn process_batch(&self, wtxn: &mut RwTxn, batch: Batch) -> Result<Vec<Task>> {
         match batch {
             Batch::Cancel(_) => todo!(),
             Batch::TaskDeletion(mut task) => {
@@ -458,8 +467,7 @@ impl IndexScheduler {
                         unreachable!()
                     };
 
-                let mut wtxn = self.env.write_txn()?;
-                let nbr_deleted_tasks = self.delete_matched_tasks(&mut wtxn, matched_tasks)?;
+                let nbr_deleted_tasks = self.delete_matched_tasks(wtxn, matched_tasks)?;
 
                 task.status = Status::Succeeded;
                 match &mut task.details {
@@ -473,7 +481,6 @@ impl IndexScheduler {
                     _ => unreachable!(),
                 }
 
-                wtxn.commit()?;
                 Ok(vec![task])
             }
             Batch::Snapshot(_) => todo!(),
@@ -484,8 +491,7 @@ impl IndexScheduler {
                     IndexOperation::DocumentDeletion { ref index_uid, .. }
                     | IndexOperation::DocumentClear { ref index_uid, .. } => {
                         // only get the index, don't create it
-                        let rtxn = self.env.read_txn()?;
-                        self.index_mapper.index(&rtxn, index_uid)?
+                        self.index_mapper.index(&wtxn, index_uid)?
                     }
                     IndexOperation::DocumentImport { ref index_uid, allow_index_creation, .. }
                     | IndexOperation::Settings { ref index_uid, allow_index_creation, .. }
@@ -493,13 +499,10 @@ impl IndexScheduler {
                     | IndexOperation::SettingsAndDocumentImport {ref index_uid, allow_index_creation, .. } => {
                         if allow_index_creation {
                             // create the index if it doesn't already exist
-                            let mut wtxn = self.env.write_txn()?;
-                            let index = self.index_mapper.create_index(&mut wtxn, index_uid)?;
-                            wtxn.commit()?;
+                            let index = self.index_mapper.create_index(wtxn, index_uid)?;
                             index
                         } else {
-                            let rtxn = self.env.read_txn()?;
-                            self.index_mapper.index(&rtxn, index_uid)?
+                            self.index_mapper.index(&wtxn, index_uid)?
                         }
                     }
                 };
@@ -515,23 +518,23 @@ impl IndexScheduler {
                 primary_key,
                 task,
             } => {
-                let mut wtxn = self.env.write_txn()?;
-                self.index_mapper.create_index(&mut wtxn, &index_uid)?;
-                wtxn.commit()?;
+                self.index_mapper.create_index(wtxn, &index_uid)?;
 
-                self.process_batch(Batch::IndexUpdate {
-                    index_uid,
-                    primary_key,
-                    task,
-                })
+                self.process_batch(
+                    wtxn,
+                    Batch::IndexUpdate {
+                        index_uid,
+                        primary_key,
+                        task,
+                    },
+                )
             }
             Batch::IndexUpdate {
                 index_uid,
                 primary_key,
                 mut task,
             } => {
-                let rtxn = self.env.read_txn()?;
-                let index = self.index_mapper.index(&rtxn, &index_uid)?;
+                let index = self.index_mapper.index(&wtxn, &index_uid)?;
 
                 if let Some(primary_key) = primary_key.clone() {
                     let mut index_wtxn = index.write_txn()?;
@@ -554,8 +557,6 @@ impl IndexScheduler {
                 index_uid,
                 mut tasks,
             } => {
-                let wtxn = self.env.write_txn()?;
-
                 let number_of_documents = {
                     let index = self.index_mapper.index(&wtxn, &index_uid)?;
                     let index_rtxn = index.read_txn()?;
@@ -578,7 +579,74 @@ impl IndexScheduler {
 
                 Ok(tasks)
             }
+            Batch::IndexSwap { mut task } => {
+                // 1. Retrieve the tasks that matched the query at enqueue-time.
+                let swaps = if let KindWithContent::IndexSwap { swaps } = &task.kind {
+                    swaps
+                } else {
+                    unreachable!()
+                };
+                for (lhs, rhs) in swaps {
+                    self.apply_index_swap(wtxn, lhs, rhs)?;
+                }
+                task.status = Status::Succeeded;
+
+                Ok(vec![task])
+            }
         }
+    }
+
+    /// Swap the index `lhs` with the index `rhs`.
+    fn apply_index_swap(&self, wtxn: &mut RwTxn, lhs: &str, rhs: &str) -> Result<()> {
+        // Note: it may seem like the content of this function is needlessly duplicated for the
+        // rename lhs -> rhs and rhs -> lhs. But steps 4 & 5 prevent refactoring it that way.
+
+        // 1. Verify that both lhs and rhs are existing indexes
+        let index_lhs_exists = self.index_mapper.index_exists(&wtxn, lhs)?;
+        if !index_lhs_exists {
+            return Err(Error::IndexNotFound(lhs.to_owned()));
+        }
+        let index_rhs_exists = self.index_mapper.index_exists(&wtxn, rhs)?;
+        if !index_rhs_exists {
+            return Err(Error::IndexNotFound(rhs.to_owned()));
+        }
+
+        // 2. Get the task set for index = name.
+        let index_lhs_task_ids =
+            &self.get_task_ids(&Query::default().with_index(lhs.to_owned()))?;
+        let index_rhs_task_ids =
+            &self.get_task_ids(&Query::default().with_index(rhs.to_owned()))?;
+
+        // 3. before_name -> new_name in the task's KindWithContent
+        for task_id in index_lhs_task_ids.iter() {
+            let mut task = self
+                .get_task(&wtxn, task_id)?
+                .ok_or(Error::CorruptedTaskQueue)?;
+            swap_index_uid_in_task(&mut task, lhs, rhs);
+            self.all_tasks.put(wtxn, &BEU32::new(task_id), &task)?;
+        }
+        for task_id in index_rhs_task_ids.iter() {
+            let mut task = self
+                .get_task(&wtxn, task_id)?
+                .ok_or(Error::CorruptedTaskQueue)?;
+            swap_index_uid_in_task(&mut task, rhs, lhs);
+            self.all_tasks.put(wtxn, &BEU32::new(task_id), &task)?;
+        }
+        // 4. remove the task from indexuid = before_name
+        // 5. add the task to indexuid = after_name
+        self.update_index(wtxn, lhs, |lhs_tasks| {
+            *lhs_tasks -= index_lhs_task_ids;
+            *lhs_tasks |= index_rhs_task_ids;
+        })?;
+        self.update_index(wtxn, rhs, |lhs_tasks| {
+            *lhs_tasks -= index_rhs_task_ids;
+            *lhs_tasks |= index_lhs_task_ids;
+        })?;
+
+        // 6. Swap in the index mapper
+        self.index_mapper.swap(wtxn, lhs, rhs)?;
+
+        Ok(())
     }
 
     fn apply_index_operation<'txn, 'i>(

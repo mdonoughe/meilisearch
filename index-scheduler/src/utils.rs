@@ -5,7 +5,7 @@ use meilisearch_types::milli::BEU32;
 use roaring::RoaringBitmap;
 
 use crate::{Error, IndexScheduler, Result, Task, TaskId};
-use meilisearch_types::tasks::{Kind, Status};
+use meilisearch_types::tasks::{Kind, KindWithContent, Status};
 
 impl IndexScheduler {
     pub(crate) fn all_task_ids(&self, rtxn: &RoTxn) -> Result<RoaringBitmap> {
@@ -162,5 +162,32 @@ impl IndexScheduler {
         self.put_kind(wtxn, kind, &tasks)?;
 
         Ok(())
+    }
+}
+
+pub fn swap_index_uid_in_task(task: &mut Task, before: &str, after: &str) {
+    use KindWithContent as K;
+    let mut index_uids = vec![];
+    match &mut task.kind {
+        K::DocumentImport { index_uid, .. } => index_uids.push(index_uid),
+        K::DocumentDeletion { index_uid, .. } => index_uids.push(index_uid),
+        K::DocumentClear { index_uid } => index_uids.push(index_uid),
+        K::Settings { index_uid, .. } => index_uids.push(index_uid),
+        K::IndexDeletion { index_uid } => index_uids.push(index_uid),
+        K::IndexCreation { index_uid, .. } => index_uids.push(index_uid),
+        K::IndexUpdate { index_uid, .. } => index_uids.push(index_uid),
+        K::IndexSwap { swaps } => {
+            for (lhs, rhs) in swaps.iter_mut() {
+                if lhs == before {
+                    index_uids.push(lhs);
+                } else if rhs == before {
+                    index_uids.push(rhs);
+                }
+            }
+        }
+        K::CancelTask { .. } | K::TaskDeletion { .. } | K::DumpExport { .. } | K::Snapshot => {}
+    };
+    for index_uid in index_uids {
+        *index_uid = after.to_owned();
     }
 }

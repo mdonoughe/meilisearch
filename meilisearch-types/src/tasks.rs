@@ -2,6 +2,7 @@ use milli::update::IndexDocumentsMethod;
 use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize, Serializer};
 use std::{
+    collections::HashSet,
     fmt::{Display, Write},
     path::PathBuf,
     str::FromStr,
@@ -57,19 +58,7 @@ impl Task {
 
     /// Return the list of indexes updated by this tasks.
     pub fn indexes(&self) -> Option<Vec<&str>> {
-        use KindWithContent::*;
-
-        match &self.kind {
-            DumpExport { .. } | Snapshot | CancelTask { .. } | TaskDeletion { .. } => None,
-            DocumentImport { index_uid, .. }
-            | DocumentDeletion { index_uid, .. }
-            | DocumentClear { index_uid }
-            | Settings { index_uid, .. }
-            | IndexCreation { index_uid, .. }
-            | IndexUpdate { index_uid, .. }
-            | IndexDeletion { index_uid } => Some(vec![index_uid]),
-            IndexSwap { lhs, rhs } => Some(vec![lhs, rhs]),
-        }
+        self.kind.indexes()
     }
 }
 
@@ -109,8 +98,7 @@ pub enum KindWithContent {
         primary_key: Option<String>,
     },
     IndexSwap {
-        lhs: String,
-        rhs: String,
+        swaps: Vec<(String, String)>,
     },
     CancelTask {
         tasks: Vec<TaskId>,
@@ -155,7 +143,14 @@ impl KindWithContent {
             | IndexCreation { index_uid, .. }
             | IndexUpdate { index_uid, .. }
             | IndexDeletion { index_uid } => Some(vec![index_uid]),
-            IndexSwap { lhs, rhs } => Some(vec![lhs, rhs]),
+            IndexSwap { swaps } => {
+                let mut indexes = HashSet::<&str>::default();
+                for (lhs, rhs) in swaps {
+                    indexes.insert(lhs.as_str());
+                    indexes.insert(rhs.as_str());
+                }
+                Some(indexes.into_iter().collect())
+            }
         }
     }
 
@@ -187,9 +182,9 @@ impl KindWithContent {
             | KindWithContent::IndexUpdate { primary_key, .. } => Some(Details::IndexInfo {
                 primary_key: primary_key.clone(),
             }),
-            KindWithContent::IndexSwap { .. } => {
-                todo!()
-            }
+            KindWithContent::IndexSwap { swaps } => Some(Details::IndexSwap {
+                swaps: swaps.clone(),
+            }),
             KindWithContent::CancelTask { .. } => {
                 None // TODO: check correctness of this return value
             }
@@ -312,6 +307,9 @@ pub enum Details {
     },
     Dump {
         dump_uid: String,
+    },
+    IndexSwap {
+        swaps: Vec<(String, String)>,
     },
 }
 

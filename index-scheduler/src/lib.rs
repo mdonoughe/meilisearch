@@ -398,13 +398,11 @@ impl IndexScheduler {
         #[cfg(test)]
         self.test_breakpoint_sdr.send(Breakpoint::Start).unwrap();
 
-        let rtxn = self.env.read_txn()?;
-        let batch = match self.create_next_batch(&rtxn)? {
+        let mut wtxn = self.env.write_txn()?;
+        let batch = match self.create_next_batch(&wtxn)? {
             Some(batch) => batch,
             None => return Ok(0),
         };
-        // we don't need this transaction any longer.
-        drop(rtxn);
 
         // 1. store the starting date with the bitmap of processing tasks.
         let mut ids = batch.ids();
@@ -425,8 +423,8 @@ impl IndexScheduler {
         }
 
         // 2. Process the tasks
-        let res = self.process_batch(batch);
-        let mut wtxn = self.env.write_txn()?;
+        let res = self.process_batch(&mut wtxn, batch);
+
         let finished_at = OffsetDateTime::now_utc();
         match res {
             Ok(tasks) => {
