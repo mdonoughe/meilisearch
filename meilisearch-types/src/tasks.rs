@@ -43,7 +43,7 @@ impl Task {
         match &self.kind {
             DumpExport { .. }
             | Snapshot
-            | CancelTask { .. }
+            | TaskCancelation { .. }
             | TaskDeletion { .. }
             | IndexSwap { .. } => None,
             DocumentImport { index_uid, .. }
@@ -61,7 +61,7 @@ impl Task {
         use KindWithContent::*;
 
         match &self.kind {
-            DumpExport { .. } | Snapshot | CancelTask { .. } | TaskDeletion { .. } => None,
+            DumpExport { .. } | Snapshot | TaskCancelation { .. } | TaskDeletion { .. } => None,
             DocumentImport { index_uid, .. }
             | DocumentDeletion { index_uid, .. }
             | DocumentClear { index_uid }
@@ -86,7 +86,7 @@ impl Task {
             | KindWithContent::IndexCreation { .. }
             | KindWithContent::IndexUpdate { .. }
             | KindWithContent::IndexSwap { .. }
-            | KindWithContent::CancelTask { .. }
+            | KindWithContent::TaskCancelation { .. }
             | KindWithContent::TaskDeletion { .. }
             | KindWithContent::DumpExport { .. }
             | KindWithContent::Snapshot => None,
@@ -94,7 +94,7 @@ impl Task {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum KindWithContent {
     DocumentImport {
@@ -133,7 +133,8 @@ pub enum KindWithContent {
         lhs: String,
         rhs: String,
     },
-    CancelTask {
+    TaskCancelation {
+        query: String,
         tasks: Vec<TaskId>,
     },
     TaskDeletion {
@@ -159,7 +160,7 @@ impl KindWithContent {
             KindWithContent::IndexDeletion { .. } => Kind::IndexDeletion,
             KindWithContent::IndexUpdate { .. } => Kind::IndexUpdate,
             KindWithContent::IndexSwap { .. } => Kind::IndexSwap,
-            KindWithContent::CancelTask { .. } => Kind::CancelTask,
+            KindWithContent::TaskCancelation { .. } => Kind::TaskCancelation,
             KindWithContent::TaskDeletion { .. } => Kind::TaskDeletion,
             KindWithContent::DumpExport { .. } => Kind::DumpExport,
             KindWithContent::Snapshot => Kind::Snapshot,
@@ -170,7 +171,7 @@ impl KindWithContent {
         use KindWithContent::*;
 
         match self {
-            DumpExport { .. } | Snapshot | CancelTask { .. } | TaskDeletion { .. } => None,
+            DumpExport { .. } | Snapshot | TaskCancelation { .. } | TaskDeletion { .. } => None,
             DocumentImport { index_uid, .. }
             | DocumentDeletion { index_uid, .. }
             | DocumentClear { index_uid }
@@ -213,7 +214,7 @@ impl KindWithContent {
             KindWithContent::IndexSwap { .. } => {
                 todo!()
             }
-            KindWithContent::CancelTask { .. } => {
+            KindWithContent::TaskCancelation { .. } => {
                 None // TODO: check correctness of this return value
             }
             KindWithContent::TaskDeletion { query, tasks } => Some(Details::TaskDeletion {
@@ -249,7 +250,7 @@ impl From<&KindWithContent> for Option<Details> {
                 primary_key: primary_key.clone(),
             }),
             KindWithContent::IndexSwap { .. } => None,
-            KindWithContent::CancelTask { .. } => None,
+            KindWithContent::TaskCancelation { .. } => None,
             KindWithContent::TaskDeletion { .. } => todo!(),
             KindWithContent::DumpExport { dump_uid, .. } => Some(Details::Dump {
                 dump_uid: dump_uid.clone(),
@@ -310,7 +311,7 @@ pub enum Kind {
     IndexDeletion,
     IndexUpdate,
     IndexSwap,
-    CancelTask,
+    TaskCancelation,
     TaskDeletion,
     DumpExport,
     Snapshot,
@@ -330,7 +331,7 @@ impl FromStr for Kind {
             "index_deletion" => Ok(Kind::IndexDeletion),
             "index_update" => Ok(Kind::IndexUpdate),
             "index_swap" => Ok(Kind::IndexSwap),
-            "cancel_task" => Ok(Kind::CancelTask),
+            "task_cancelation" => Ok(Kind::TaskCancelation),
             "task_deletion" => Ok(Kind::TaskDeletion),
             "dump_export" => Ok(Kind::DumpExport),
             "snapshot" => Ok(Kind::Snapshot),
@@ -362,6 +363,11 @@ pub enum Details {
     },
     ClearAll {
         deleted_documents: Option<u64>,
+    },
+    TaskCancelation {
+        matched_tasks: usize,
+        canceled_tasks: Option<usize>,
+        original_query: String,
     },
     TaskDeletion {
         matched_tasks: usize,
